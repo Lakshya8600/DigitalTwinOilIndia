@@ -1,0 +1,32 @@
+well_id,cycle_number,date,day_in_cycle,failure_mode,oil_viscosity_cP_at_failure,rod_floating_risk_score_at_failure,spm_at_failure,workover_downtime_days
+BGW-001,4,2020-10-08,81,Pump unseating,1614.5,0.498,4.02,8
+BGW-002,2,2019-06-27,40,Pump unseating,475.7,0.281,5.56,5
+BGW-002,3,2019-11-12,91,Coupling failure,1620.9,0.552,4.32,8
+BGW-004,3,2019-08-20,79,Pump unseating,806.3,0.432,5.5,10
+BGW-004,5,2020-03-22,63,Rod parting,537.1,0.384,5.97,3
+BGW-004,7,2020-11-28,22,Rod parting,168.5,0.261,6.45,3
+BGW-005,1,2020-02-01,114,Excessive rod wear,3408.3,0.604,2.7,11
+BGW-005,2,2020-04-08,49,Pump unseating,1387.5,0.27,3.14,8
+BGW-005,3,2020-08-13,112,Excessive rod wear,2921.7,0.548,2.56,10
+BGW-005,4,2020-12-16,105,Excessive rod wear,2809.0,0.559,2.67,2
+BGW-006,1,2019-05-11,127,Pump unseating,2030.9,0.433,2.83,6
+BGW-006,5,2020-07-21,107,Excessive rod wear,1952.0,0.461,3.14,3
+BGW-006,6,2020-11-02,84,Pump unseating,1531.1,0.342,3.3,7
+BGW-007,3,2020-03-31,45,Excessive rod wear,1804.1,0.365,2.82,10
+BGW-008,1,2019-04-30,67,Excessive rod wear,2696.2,0.5,2.32,4
+BGW-008,3,2019-11-10,99,Rod parting,2531.4,0.685,3.52,4
+BGW-008,4,2020-01-24,64,Pump unseating,1837.8,0.379,2.89,6
+BGW-008,4,2020-02-18,89,Rod parting,2475.3,0.5,2.42,3
+BGW-009,5,2020-12-17,110,Excessive rod wear,2042.4,0.592,3.72,3
+BGW-009,5,2021-01-11,135,Pump unseating,2264.1,0.554,3.08,6
+BGW-010,1,2019-07-01,110,Tubing leak (rod-induced),1015.6,0.185,3.41,11
+BGW-011,1,2019-10-30,109,Excessive rod wear,901.8,0.16,3.63,9
+BGW-011,5,2020-10-05,42,Coupling failure,324.4,0.028,4.47,5
+BGW-012,1,2019-08-12,40,Pump unseating,1194.4,0.434,4.57,11
+BGW-012,1,2019-09-25,84,Excessive rod wear,2468.9,0.503,2.51,9
+BGW-013,4,2020-09-02,52,Excessive rod wear,1659.7,0.516,4.03,6
+BGW-013,5,2021-01-02,22,Tubing leak (rod-induced),527.2,0.319,5.62,8
+BGW-013,5,2021-03-05,84,Pump unseating,2284.1,0.474,2.51,10
+BGW-015,2,2019-08-29,61,Pump unseating,2616.9,0.501,2.42,7
+BGW-015,2,2019-08-30,62,Pump unseating,2652.5,0.671,3.38,4
+BGW-015,2,2019-09-07,70,Pump unseating,2910.7,0.6,2.86,11
