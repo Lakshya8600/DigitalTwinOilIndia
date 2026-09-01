@@ -5,6 +5,7 @@ import streamlit as st
 from plotly.subplots import make_subplots
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
+
 st.set_page_config(page_title="Well Operations Intelligence", page_icon="◈", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
@@ -260,7 +261,6 @@ button[data-baseweb="tab"][aria-selected="true"] {
 ::-webkit-scrollbar-thumb:hover {
     background: #3b4d5a;
 }
-
 </style>
 """, unsafe_allow_html=True)
 
@@ -282,23 +282,241 @@ def train_models(daily):
     health = RandomForestClassifier(n_estimators=160, class_weight="balanced", random_state=42).fit(model_input, daily["rod_floating_flag"])
     return production, health, features
 
+@st.cache_resource
+def train_css_model(cycles):
+    css_features = [
+        "steam_volume_tonnes",
+        "injection_pressure_barg",
+        "soak_days"
+    ]
+
+    X = cycles[css_features]
+    y = cycles["peak_wellbore_temp_C"]
+
+    css_model = RandomForestRegressor(
+        n_estimators=160,
+        random_state=42
+    ).fit(X, y)
+
+    return css_model, css_features
+@st.cache_resource
+def train_css_production_model(cycles):
+    css_features = [
+        "steam_volume_tonnes",
+        "injection_pressure_barg",
+        "soak_days"
+    ]
+
+    X = cycles[css_features]
+    y = cycles["cycle_oil_produced_bbl"]
+
+    model = RandomForestRegressor(
+        n_estimators=160,
+        random_state=42
+    ).fit(X, y)
+
+    return model
+@st.cache_resource
+def train_css_sor_model(cycles):
+    css_features = [
+        "steam_volume_tonnes",
+        "injection_pressure_barg",
+        "soak_days"
+    ]
+
+    X = cycles[css_features]
+    y = cycles["steam_oil_ratio_SOR"]
+
+    model = RandomForestRegressor(
+        n_estimators=160,
+        random_state=42
+    ).fit(X, y)
+
+    return model
+
+@st.cache_resource
+def train_viscosity_model(daily):
+    X = daily[["reservoir_zone_temp_C"]]
+    y = daily["oil_viscosity_cP"]
+
+    model = RandomForestRegressor(
+        n_estimators=160,
+        random_state=42
+    ).fit(X, y)
+
+    return model
+
+def optimize_css(cycles, css_model, css_production_model, css_sor_model):
+    steam_values = cycles["steam_volume_tonnes"].quantile(
+        [0.25, 0.50, 0.75]
+    ).tolist()
+
+    pressure_values = cycles["injection_pressure_barg"].quantile(
+        [0.25, 0.50, 0.75]
+    ).tolist()
+
+    soak_values = sorted(cycles["soak_days"].unique())
+
+    scenarios = []
+
+    for steam in steam_values:
+        for pressure in pressure_values:
+            for soak in soak_values:
+
+                scenario = pd.DataFrame(
+                    [[steam, pressure, soak]],
+                    columns=[
+                        "steam_volume_tonnes",
+                        "injection_pressure_barg",
+                        "soak_days"
+                    ]
+                )
+
+                predicted_temp = float(
+                    css_model.predict(scenario)[0]
+                )
+
+                predicted_oil = float(
+                    css_production_model.predict(scenario)[0]
+                )
+
+                predicted_sor = float(
+                    css_sor_model.predict(scenario)[0]
+                )
+
+                scenarios.append({
+                    "steam": steam,
+                    "pressure": pressure,
+                    "soak": soak,
+                    "temperature": predicted_temp,
+                    "oil": predicted_oil,
+                    "sor": predicted_sor
+                })
+
+    result = pd.DataFrame(scenarios)
+
+    # Higher oil production and lower SOR are preferred.
+    result["score"] = (
+        result["oil"] / result["sor"].clip(lower=0.01)
+    )
+
+    return result.sort_values(
+        ["score", "oil"],
+        ascending=[False, False]
+    ).reset_index(drop=True)
+@st.cache_data
+def build_css_srp_dataset(cycles, daily):
+    css = cycles.copy()
+    srp = daily.copy()
+
+    css["production_start_date"] = pd.to_datetime(
+        css["production_start_date"]
+    )
+
+    css["production_end_date"] = (
+        css["production_start_date"]
+        + pd.to_timedelta(
+            css["production_days_actual"] - 1,
+            unit="D"
+        )
+    )
+
+    srp["date"] = pd.to_datetime(srp["date"])
+
+    merged = css.merge(
+        srp,
+        on="well_id",
+        suffixes=("_css", "_srp")
+    )
+
+    matched = merged[
+        (merged["date"] >= merged["production_start_date"]) &
+        (merged["date"] <= merged["production_end_date"])
+    ].copy()
+
+    matched["cycle_number"] = matched["cycle_number_css"]
+
+    return matched
+
+@st.cache_resource
+def train_css_srp_models(css_srp_data):
+
+    features = [
+        "reservoir_zone_temp_C",
+        "oil_viscosity_cP",
+        "stroke_length_in",
+        "spm"
+    ]
+
+    X = css_srp_data[features]
+
+    production_model = RandomForestRegressor(
+        n_estimators=120,
+        random_state=42
+    ).fit(
+        X,
+        css_srp_data["oil_rate_bbl_per_day"]
+    )
+
+    risk_model = RandomForestRegressor(
+        n_estimators=200,
+        random_state=42
+    ).fit(
+        X,
+        css_srp_data["rod_floating_risk_score"]
+    )
+
+    return production_model, risk_model
 
 def risk_for(model, scenario):
-    probabilities = model.predict_proba(scenario)[0]
-    classes = list(model.classes_)
-    return float(probabilities[classes.index(True)]) if True in classes else 0.0
+    risk = float(model.predict(scenario)[0])
+    return float(np.clip(risk, 0, 1))
 
 
 def recommendation(production, health, features, temp, viscosity, risk_limit):
     options = []
-    for stroke in [80, 100, 120]:
-        for spm in np.arange(2.0, 8.1, 0.2):
-            scenario = pd.DataFrame([[temp, viscosity, stroke, spm]], columns=features)
-            options.append({"stroke": stroke, "spm": round(float(spm), 1), "oil": float(production.predict(scenario)[0]), "risk": risk_for(health, scenario)})
+
+    for stroke in [80, 90, 100]:
+        for spm in np.arange(2.0, 6.6, 0.2):
+            scenario = pd.DataFrame(
+                [[temp, viscosity, stroke, spm]],
+                columns=features
+            )
+
+            oil_prediction = float(production.predict(scenario)[0])
+            rod_risk = risk_for(health, scenario)
+
+            options.append({
+                "stroke": stroke,
+                "spm": round(float(spm), 1),
+                "oil": oil_prediction,
+                "risk": rod_risk
+            })
+
     candidates = pd.DataFrame(options)
-    safe = candidates[candidates["risk"] <= risk_limit]
-    chosen = (safe if not safe.empty else candidates).sort_values("oil", ascending=False).iloc[0]
+
+    # Mark operating points that satisfy the accepted rod-risk limit
     candidates["safe"] = candidates["risk"] <= risk_limit
+
+    safe = candidates[candidates["safe"]]
+
+    if not safe.empty:
+        # Normal optimization:
+        # among safe settings, maximize predicted oil production
+        chosen = safe.sort_values(
+            "oil",
+            ascending=False
+        ).iloc[0]
+
+    else:
+        # No setting satisfies the risk constraint.
+        # Choose the lowest-risk operating point instead of
+        # blindly selecting the highest-production point.
+        chosen = candidates.sort_values(
+            ["risk", "oil"],
+            ascending=[True, False]
+        ).iloc[0]
+
     return chosen, candidates
 
 
@@ -322,32 +540,360 @@ def chart_title(text):
 
 daily, cycles, failures, wells = load_data()
 production, health, features = train_models(daily)
+css_model, css_features = train_css_model(cycles)
+css_production_model = train_css_production_model(cycles)
+css_sor_model = train_css_sor_model(cycles)
+viscosity_model = train_viscosity_model(daily)
+css_options = optimize_css(
+    cycles,
+    css_model,
+    css_production_model,
+    css_sor_model
+)
+
+best_css = css_options.iloc[0]
+css_srp_data = build_css_srp_dataset(cycles, daily)
+css_srp_production, css_srp_health = train_css_srp_models(css_srp_data)
+
+def joint_optimize_css_srp(
+    css_steam,
+    css_pressure,
+    css_soak,
+    css_model,
+    css_sor_model,
+    css_srp_production,
+    css_srp_health,
+    viscosity_model,
+    features,
+    risk_limit
+):
+
+    # ---------------- CSS PREDICTION ----------------
+
+    css_input = pd.DataFrame(
+        [[css_steam, css_pressure, css_soak]],
+        columns=[
+            "steam_volume_tonnes",
+            "injection_pressure_barg",
+            "soak_days"
+        ]
+    )
+
+    predicted_temperature = float(
+        css_model.predict(css_input)[0]
+    )
+
+    predicted_sor = float(
+        css_sor_model.predict(css_input)[0]
+    )
+
+    viscosity_input = pd.DataFrame(
+       [[predicted_temperature]],
+       columns=["reservoir_zone_temp_C"]
+    )
+
+    predicted_viscosity = float(
+       viscosity_model.predict(viscosity_input)[0]
+    )
+    # ---------------- SRP OPTIMIZATION ----------------
+
+    srp_scenarios = []
+
+    for stroke in [80, 90, 100]:
+
+        for spm in np.arange(2.0, 6.6, 0.2):
+
+            srp_scenarios.append([
+                predicted_temperature,
+                predicted_viscosity,
+                stroke,
+                round(float(spm), 1)
+            ])
+
+    srp_scenarios = pd.DataFrame(
+        srp_scenarios,
+        columns=features
+    )
+
+    # Predict oil production
+    oil_predictions = css_srp_production.predict(
+        srp_scenarios
+    )
+
+    # Predict rod-floating risk
+    risk_predictions = css_srp_health.predict(
+       srp_scenarios
+    )
+
+    risk_predictions = np.clip(
+       risk_predictions,
+      0,
+      1
+    )
+
+    # Build candidate table
+    candidates = srp_scenarios.copy()
+
+    candidates["oil"] = oil_predictions
+    candidates["risk"] = risk_predictions
+
+    # Find safe SRP operating points
+    safe = candidates[
+        candidates["risk"] <= risk_limit
+    ]
+
+    if not safe.empty:
+
+        # Among safe settings,
+        # choose highest predicted oil production
+        chosen = safe.sort_values(
+            "oil",
+            ascending=False
+        ).iloc[0]
+
+    else:
+
+        # If no setting is safe,
+        # choose lowest-risk setting
+        chosen = candidates.sort_values(
+            ["risk", "oil"],
+            ascending=[True, False]
+        ).iloc[0]
+
+    # ---------------- JOINT SCORE ----------------
+
+    joint_score = float(
+        chosen["oil"] /
+        (1 + predicted_sor)
+    )
+
+    return {
+        "steam": float(css_steam),
+        "pressure": float(css_pressure),
+        "soak": float(css_soak),
+        "temperature": predicted_temperature,
+        "sor": predicted_sor,
+        "viscosity": predicted_viscosity,
+        "stroke": float(chosen["stroke_length_in"]),
+        "spm": float(chosen["spm"]),
+        "oil": float(chosen["oil"]),
+        "risk": float(chosen["risk"]),
+        "joint_score": joint_score
+    }
 
 well_ids = sorted(wells["well_id"].unique())
-with st.sidebar:
-    st.markdown('<p class="brand">WELLSIGHT</p>', unsafe_allow_html=True)
-    st.markdown('<p class="brand-sub">Operations intelligence · v2.0</p>', unsafe_allow_html=True)
-    st.divider()
-    st.markdown('<p class="sidebar-label">Well selection</p>', unsafe_allow_html=True)
-    selected_well = st.selectbox("Asset focus", well_ids, index=0)
-    well_daily = daily[daily["well_id"] == selected_well].sort_values("date")
-    latest = well_daily.iloc[-1]
-    st.markdown('<p class="sidebar-label">Scenario controls</p>', unsafe_allow_html=True)
-    temperature = st.slider("Reservoir-zone temperature (°C)", 40.0, 200.0, float(latest["reservoir_zone_temp_C"]), .5)
-    viscosity = st.slider("Oil viscosity (cP)", 50.0, 4000.0, float(latest["oil_viscosity_cP"]), 10.0)
-    risk_limit_pct = st.slider("Maximum accepted rod risk", 5, 60, 25, 1, format="%d%%")
-    risk_limit = risk_limit_pct / 100
-    lookback = st.slider("Trend window (days)", 15, min(120, len(well_daily)), min(60, len(well_daily)))
-    st.divider()
-    st.caption("Model inputs are editable scenario values. Historical charts remain grounded in recorded operating data.")
 
-chosen, options = recommendation(production, health, features, temperature, viscosity, risk_limit)
+with st.sidebar:
+    st.markdown(
+        '<p class="brand">WELLSIGHT</p>',
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        '<p class="brand-sub">Operations intelligence · v2.0</p>',
+        unsafe_allow_html=True
+    )
+
+    st.divider()
+
+    st.markdown(
+        '<p class="sidebar-label">Well selection</p>',
+        unsafe_allow_html=True
+    )
+
+    selected_well = st.selectbox(
+        "Asset focus",
+        well_ids,
+        index=0
+    )
+
+    well_daily = daily[
+        daily["well_id"] == selected_well
+    ].sort_values("date")
+
+    latest = well_daily.iloc[-1]
+
+    # ---------------- CSS CONTROLS ----------------
+
+    st.markdown(
+        '<p class="sidebar-label">CSS scenario controls</p>',
+        unsafe_allow_html=True
+    )
+
+    latest_css = cycles[
+        cycles["well_id"] == selected_well
+    ].sort_values("cycle_number").iloc[-1]
+
+    css_steam = st.slider(
+    "Steam volume (tonnes)",
+    float(cycles["steam_volume_tonnes"].min()),
+    float(cycles["steam_volume_tonnes"].max()),
+    float(latest_css["steam_volume_tonnes"]),
+    10.0
+)
+
+    css_pressure = st.slider(
+        "Injection pressure (barg)",
+        5.0,
+        40.0,
+        float(latest_css["injection_pressure_barg"]),
+        0.5
+    )
+
+    css_soak = st.slider(
+        "Soak period (days)",
+        1.0,
+        10.0,
+        float(latest_css["soak_days"]),
+        1.0
+    )
+
+    # ---------------- SRP CONTROLS ----------------
+
+    st.markdown(
+        '<p class="sidebar-label">SRP scenario controls</p>',
+        unsafe_allow_html=True
+    )
+
+    temperature = st.slider(
+        "Reservoir-zone temperature (°C)",
+        40.0,
+        200.0,
+        float(latest["reservoir_zone_temp_C"]),
+        0.5
+    )
+
+    viscosity = st.slider(
+        "Oil viscosity (cP)",
+        50.0,
+        4000.0,
+        float(latest["oil_viscosity_cP"]),
+        10.0
+    )
+    stroke = st.slider(
+      "Stroke length (in)",
+      60.0,
+      110.0,
+      float(latest["stroke_length_in"]),
+      5.0
+    )
+
+    spm = st.slider(
+     "Pump speed (SPM)",
+      2.0,
+      6.5,
+      float(latest["spm"]),
+      0.1
+    )
+
+    risk_limit_pct = st.slider(
+        "Maximum accepted rod risk",
+        5,
+        60,
+        25,
+        1,
+        format="%d%%"
+    )
+
+    risk_limit = risk_limit_pct / 100
+
+    lookback = st.slider(
+        "Trend window (days)",
+        15,
+        min(120, len(well_daily)),
+        min(60, len(well_daily))
+    )
+
+    st.divider()
+
+    st.caption(
+        "CSS controls drive thermal prediction and SOR. "
+        "SRP controls drive pump optimization and rod-risk prediction."
+    )
+joint_result = joint_optimize_css_srp(
+    css_steam,
+    css_pressure,
+    css_soak,
+    css_model,
+    css_sor_model,
+    css_srp_production,
+    css_srp_health,
+    viscosity_model,
+    features,
+    risk_limit
+)
+chosen, options = recommendation(css_srp_production, css_srp_health, features, joint_result["temperature"],
+    joint_result["viscosity"], risk_limit)
+recommended_scenario = pd.DataFrame(
+    [[
+        joint_result["temperature"],
+        joint_result["viscosity"],
+        joint_result["stroke"],
+        joint_result["spm"]
+    ]],
+    columns=features
+)
+
+recommended_risk = float(chosen["risk"])
+
+current_scenario = pd.DataFrame(
+    [[
+        temperature,
+        viscosity,
+        stroke,
+        spm
+    ]],
+    columns=features
+)
+
+current_risk = risk_for(
+    css_srp_health,
+    current_scenario
+)
+
+recommendation_safe = recommended_risk <= risk_limit
+joint_risk = float(joint_result["risk"])
 predicted_fill = max(0, min(100, 98 - viscosity / 65 - chosen["spm"] * 1.2))
 predicted_load = 5 + viscosity / 300 + chosen["spm"] * .5
-current_risk = float(chosen["risk"])
 asset_cycles = cycles[cycles["well_id"] == selected_well]
 asset_failures = failures[failures["well_id"] == selected_well]
 asset_info = wells[wells["well_id"] == selected_well].iloc[0]
+latest_css = asset_cycles.sort_values("cycle_number").iloc[-1]
+css_scenario = pd.DataFrame(
+    [[
+        css_steam,
+        css_pressure,
+        css_soak
+    ]],
+    columns=css_features
+)
+
+predicted_css_temp = float(
+    css_model.predict(css_scenario)[0]
+)
+
+predicted_css_sor = float(
+    css_sor_model.predict(css_scenario)[0]
+)
+selected_cycle_srp = css_srp_data[
+    (css_srp_data["well_id"] == selected_well) &
+    (css_srp_data["cycle_number"] == latest_css["cycle_number"])
+]
+if not selected_cycle_srp.empty:
+    css_srp_temp = selected_cycle_srp["reservoir_zone_temp_C"].mean()
+    css_srp_viscosity = selected_cycle_srp["oil_viscosity_cP"].mean()
+else:
+    css_srp_temp = latest["reservoir_zone_temp_C"]
+    css_srp_viscosity = latest["oil_viscosity_cP"]
+
+css_aware_chosen, css_aware_options = recommendation(
+    production,
+    health,
+    features,
+    css_srp_temp,
+    css_srp_viscosity,
+    risk_limit
+)
 
 st.html("""
 <p style="
@@ -369,23 +915,259 @@ st.markdown(f'<div class="subtitle">Operating picture for <b>{selected_well}</b>
 st.markdown('<div class="section-label">Live operating picture</div>', unsafe_allow_html=True)
 m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("Oil rate", f"{latest['oil_rate_bbl_per_day']:.1f} bbl/d", f"{latest['water_cut_frac'] * 100:.1f}% water cut", delta_color="off")
-m2.metric("Scenario output", f"{chosen['oil']:.1f} bbl/d", f"{chosen['oil'] - latest['oil_rate_bbl_per_day']:+.1f} vs latest")
-m3.metric("Rod risk", f"{current_risk * 100:.1f}%", f"limit {risk_limit * 100:.0f}%", delta_color="inverse")
+production_gain = chosen['oil'] - latest['oil_rate_bbl_per_day']
+production_gain_pct = (
+    production_gain / latest['oil_rate_bbl_per_day'] * 100
+    if latest['oil_rate_bbl_per_day'] != 0
+    else 0
+)
+
+m2.metric(
+    "Scenario output",
+    f"{chosen['oil']:.1f} bbl/d",
+    f"+{production_gain:.1f} bbl/d ({production_gain_pct:.1f}%)"
+)
+m3.metric(
+    "Current rod risk",
+    f"{current_risk * 100:.1f}%",
+    f"limit {risk_limit * 100:.0f}%",
+    delta_color="inverse"
+)
 m4.metric("Fillage", f"{predicted_fill:.1f}%", f"{latest['pump_fillage_frac'] * 100:.1f}% observed")
 m5.metric("Motor load", f"{predicted_load:.1f} kW", f"{latest['motor_load_kW']:.1f} kW observed")
 m6.metric("Recommended", f"{chosen['stroke']:.0f} in / {chosen['spm']:.1f} SPM", "optimized setpoint")
 
+st.markdown(
+    '<div class="section-label">CSS thermal state</div>',
+    unsafe_allow_html=True
+)
+
+css1, css2, css3, css4 = st.columns(4)
+
+css1.metric(
+    "Latest CSS cycle",
+    f"Cycle {int(latest_css['cycle_number'])}"
+)
+
+css2.metric(
+    "Steam scenario",
+    f"{css_steam:.1f} t"
+)
+
+css3.metric(
+    "Predicted temperature",
+    f"{predicted_css_temp:.1f} °C"
+)
+
+css4.metric(
+    "Predicted SOR",
+    f"{predicted_css_sor:.2f}"
+)
+if joint_result is not None:
+
+    st.markdown("## Joint CSS + SRP Optimal Scenario")
+    st.caption("Recommended operating point based on the joint optimization model")
+
+    css_col, srp_col = st.columns(2, gap="large")
+
+    with css_col:
+        with st.container(border=True):
+            st.markdown("#### CSS OPTIMIZATION")
+            st.caption("Cyclic Steam Stimulation")
+
+            c1, c2 = st.columns(2)
+
+            with c1:
+                st.metric(
+                    "Steam",
+                    f'{joint_result["steam"]:.1f} t'
+                )
+
+                st.metric(
+                    "Injection Pressure",
+                    f'{joint_result["pressure"]:.1f} barg'
+                )
+
+                st.metric(
+                    "Soak",
+                    f'{joint_result["soak"]:.1f} days'
+                )
+
+            with c2:
+                st.metric(
+                    "Predicted Temperature",
+                    f'{joint_result["temperature"]:.1f} °C'
+                )
+
+                st.metric(
+                    "Predicted SOR",
+                    f'{joint_result["sor"]:.2f}'
+                )
+
+    with srp_col:
+        with st.container(border=True):
+            st.markdown("#### SRP OPTIMIZATION")
+            st.caption("Sucker Rod Pump")
+
+            c1, c2 = st.columns(2)
+
+            with c1:
+                st.metric(
+                    "Stroke",
+                    f'{joint_result["stroke"]:.0f} in'
+                )
+
+                st.metric(
+                    "SPM",
+                    f'{joint_result["spm"]:.1f}'
+                )
+
+            with c2:
+                st.metric(
+                    "Predicted Oil Production",
+                    f'{joint_result["oil"]:.1f} bbl/d'
+                )
+
+                st.metric(
+                    "Predicted Rod-Floating Risk",
+                    f'{recommended_risk * 100:.1f}%'
+                )
+
+    st.markdown("")
+
+    score = joint_result["joint_score"]
+
+    if score >= 90:
+        status = "Excellent"
+    elif score >= 75:
+        status = "Good"
+    else:
+        status = "Needs Improvement"
+
+    with st.container(border=True):
+        st.markdown("### JOINT OPTIMIZATION SCORE")
+
+        score_col, status_col = st.columns([2, 1])
+
+        with score_col:
+            st.metric(
+                "Overall Score",
+                f"{score:.2f}"
+            )
+
+        with status_col:
+            st.metric(
+                "Assessment",
+                status
+            )
+
+else:
+    st.warning("No feasible joint CSS + SRP scenario found.")
+
+st.markdown(
+    '<div class="section-label">Operational advisory</div>',
+    unsafe_allow_html=True
+)
+
+if current_risk > risk_limit:
+
+    st.warning(
+        f"Current operating condition exceeds the {risk_limit * 100:.0f}% rod-risk limit."
+    )
+
+    adv1, adv2, adv3 = st.columns(3)
+
+    adv1.metric(
+        "Current rod risk",
+        f"{current_risk * 100:.1f}%"
+    )
+
+    adv2.metric(
+        "Recommended rod risk",
+        f"{recommended_risk * 100:.1f}%"
+    )
+
+    adv3.metric(
+        "Expected oil production",
+        f"{chosen['oil']:.1f} bbl/d"
+    )
+
+    st.info(
+        f"Recommended setting: "
+        f"{chosen['stroke']:.0f} in / {chosen['spm']:.1f} SPM"
+    )
+
+else:
+
+    st.success(
+        f"Current operating condition is within the "
+        f"{risk_limit * 100:.0f}% rod-risk limit."
+    )
+
+    adv1, adv2, adv3 = st.columns(3)
+
+    adv1.metric(
+        "Current rod risk",
+        f"{current_risk * 100:.1f}%"
+    )
+
+    adv2.metric(
+        "Recommended rod risk",
+        f"{recommended_risk * 100:.1f}%"
+    )
+
+    adv3.metric(
+        "Expected oil production",
+        f"{chosen['oil']:.1f} bbl/d"
+    )
+
+    st.info(
+        f"Recommended setting: "
+        f"{chosen['stroke']:.0f} in / {chosen['spm']:.1f} SPM"
+    )
+
 left, center, right = st.columns([1.1, 1.4, 1.1])
 with left:
-    st.markdown('<div class="section-label">Recommended action</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="callout"><b>Operate at {chosen["stroke"]:.0f} in and {chosen["spm"]:.1f} SPM.</b><br>Projected {chosen["oil"]:.1f} bbl/d while keeping rod risk at {current_risk * 100:.1f}%.</div>', unsafe_allow_html=True)
-    st.markdown(f'<p class="delta-note">Scenario delta: {temperature - latest["reservoir_zone_temp_C"]:+.1f} °C and {viscosity - latest["oil_viscosity_cP"]:+.0f} cP from latest telemetry.</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-label">Recommended action</div>',
+        unsafe_allow_html=True
+    )
+
+    if recommendation_safe:
+        action_text = (
+            f'<b>Operate at {chosen["stroke"]:.0f} in and '
+            f'{chosen["spm"]:.1f} SPM.</b><br>'
+            f'Projected {chosen["oil"]:.1f} bbl/d with rod risk at '
+            f'{recommended_risk * 100:.1f}%, within the {risk_limit * 100:.0f}% limit.'
+        )
+    else:
+        action_text = (
+            f'<b>No safe operating point found under the '
+            f'{risk_limit * 100:.0f}% rod-risk limit.</b><br>'
+            f'Best available scenario: {chosen["stroke"]:.0f} in and '
+            f'{chosen["spm"]:.1f} SPM, projecting {chosen["oil"]:.1f} bbl/d '
+            f'with {recommended_risk * 100:.1f}% rod risk.'
+        )
+
+    st.markdown(
+        f'<div class="callout">{action_text}</div>',
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        f'<p class="delta-note">'
+        f'Scenario delta: '
+        f'{temperature - latest["reservoir_zone_temp_C"]:+.1f} °C and '
+        f'{viscosity - latest["oil_viscosity_cP"]:+.0f} cP from latest telemetry.'
+        f'</p>',
+        unsafe_allow_html=True
+    )  
 with center:
     gauge = go.Figure(go.Indicator(
         mode="gauge+number",
         value=current_risk * 100,
         number={"suffix": "%", "font": {"size": 28, "color": "#e6edf2"}},
-        title={"text": "ROD FLOATING RISK", "font": {"size": 12, "color": "#8b9aa5"}},
+        title={"text": "CURRENT ROD FLOATING RISK", "font": {"size": 12, "color": "#8b9aa5"}},
         gauge={
             "axis": {"range": [0, 100], "tickcolor": "#4a5a66", "tickfont": {"color": "#8b9aa5"}},
             "bar": {"color": "#e09a45", "thickness": 0.72},
